@@ -1,43 +1,47 @@
 name: Publish to PowerShell Gallery
+run-name: "Release: ${{ github.ref_name || github.run_id }}"
 
 on:
   push:
-    tags:
-      - 'v*.*.*'  # Пример: v0.9.3
+    tags: ['v*.*.*']
+  workflow_dispatch:
 
 jobs:
   publish:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install PSResourceGet (Publish-PSResource)
+      - name: Install and import PSResourceGet
         shell: pwsh
         run: |
           Set-PSRepository PSGallery -InstallationPolicy Trusted
           Install-Module Microsoft.PowerShell.PSResourceGet -Scope CurrentUser -Force -Verbose
           Import-Module Microsoft.PowerShell.PSResourceGet -Force
+          Get-Module Microsoft.PowerShell.PSResourceGet -ListAvailable | Select Name,Version
 
       - name: Derive version from git tag and update ModuleVersion
         shell: pwsh
         env:
-          GIT_TAG: ${{ github.ref_name }}   # e.g. v1.2.3
+          GIT_TAG: ${{ github.ref_name }}
         run: |
-          $version = $env:GIT_TAG -replace '^v',''
-          if ($version -notmatch '^\d+\.\d+\.\d+$') {
-            throw "Git tag '$($env:GIT_TAG)' must look like v1.2.3"
+          try {
+            Write-Host "Ref name: $env:GIT_TAG"
+            $version = $env:GIT_TAG -replace '^v',''
+            if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Git tag '$($env:GIT_TAG)' must look like v1.2.3" }
+
+            $psd1 = Join-Path $PWD '1CMgmt.psd1'
+            if (-not (Test-Path $psd1)) { throw "Manifest not found: $psd1 (PWD: $PWD)" }
+
+            Import-Module Microsoft.PowerShell.PSResourceGet -Force
+            Update-PSModuleManifest -Path $psd1 -ModuleVersion $version -ErrorAction Stop
+            Write-Host "ModuleVersion set to $version"
+            Test-ModuleManifest -Path $psd1 | Format-List * | Out-String | Write-Host
+          } catch {
+            $_ | Format-List * -Force | Out-String | Write-Host
+            throw
           }
-
-          # Обновляем ModuleVersion корректно, штатной командой PSResourceGet:
-          Update-PSModuleManifest -Path '1CMgmt.psd1' -ModuleVersion $version
-          Write-Host "ModuleVersion set to $version"
-
-      - name: Validate manifest
-        shell: pwsh
-        run: |
-          Test-ModuleManifest -Path '1CMgmt.psd1' | Format-List * | Out-String | Write-Host
 
       - name: Publish to PSGallery
         shell: pwsh
@@ -45,10 +49,7 @@ jobs:
           PSGALLERY_API_KEY: ${{ secrets.PSGALLERY_API_KEY }}
         run: |
           if (-not $env:PSGALLERY_API_KEY) { throw "Missing PSGALLERY_API_KEY secret" }
-
-          # Явно регистрировать PSGallery обычно не нужно, но на всякий случай:
           if (-not (Get-PSResourceRepository | Where-Object Name -eq 'PSGallery')) {
             Register-PSResourceRepository -Name PSGallery -Uri 'https://www.powershellgallery.com/api/v2' -Trusted
           }
-
           Publish-PSResource -Path . -Repository PSGallery -ApiKey $env:PSGALLERY_API_KEY -Verbose
