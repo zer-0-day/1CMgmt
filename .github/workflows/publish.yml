@@ -3,7 +3,7 @@ run-name: "Release: ${{ github.ref_name || github.run_id }}"
 
 on:
   push:
-    tags: ['v*.*.*']   # пример: v1.0.5
+    tags: ['v*.*.*']   # пример: v1.0.7
   workflow_dispatch:
 
 jobs:
@@ -32,7 +32,7 @@ jobs:
       - name: Derive version from git tag and update ModuleVersion (PSGet v2)
         shell: pwsh
         env:
-          GIT_TAG: ${{ github.ref_name }}   # например, v1.0.5
+          GIT_TAG: ${{ github.ref_name }}   # напр., v1.0.7
         run: |
           try {
             Write-Host "Ref name: $env:GIT_TAG"
@@ -44,7 +44,6 @@ jobs:
             $psd1 = Join-Path $PWD '1CMgmt.psd1'
             if (-not (Test-Path $psd1)) { throw "Manifest not found: $psd1 (PWD: $PWD)" }
 
-            # В PowerShellGet v2 это «родной» cmdlet, не прокси
             Update-ModuleManifest -Path $psd1 -ModuleVersion $version -ErrorAction Stop
             Write-Host "ModuleVersion set to $version"
 
@@ -63,16 +62,14 @@ jobs:
           Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path dist | Out-Null
 
-          # Копируем ключевые файлы модуля
+          # 1) Ключевые файлы модуля
           robocopy . dist 1CMgmt.psd1 1CMgmt.psm1 README.md LICENSE /NFL /NDL
           if ($LASTEXITCODE -gt 7) { throw "robocopy(1) failed with $LASTEXITCODE" }
 
-          # Копируем Public/ и Private/ (рекурсивно), исключая служебные каталоги и файлы
-          robocopy . dist /MIR /XD .git .github dist .vscode `
-            /S /XD test tests Test Tests `
-            /XF 1CMgmt.nuspec PSGetModuleInfo.xml .gitignore .gitattributes
-
-          # robocopy использует битовую маску кодов, 0–7 считаются success
+          # 2) Рекурсивно нужные каталоги, исключив служебные и мусор
+          robocopy . dist /MIR /S `
+            /XD .git .github dist .vscode test tests Test Tests `
+            /XF 1CMgmt.nuspec PSGetModuleInfo.xml .gitignore .gitattributes .DS_Store
           if ($LASTEXITCODE -gt 7) { throw "robocopy(2) failed with $LASTEXITCODE" }
 
           Write-Host "Staged content:"
@@ -84,12 +81,28 @@ jobs:
         env:
           PSGALLERY_API_KEY: ${{ secrets.PSGALLERY_API_KEY }}
         run: |
-          if (-not $env:PSGALLERY_API_KEY) { throw "Missing PSGALLERY_API_KEY secret" }
+          try {
+            if (-not $env:PSGALLERY_API_KEY) { throw "Missing PSGALLERY_API_KEY secret" }
 
-          # Ставим и импортируем PSResourceGet (современный публикатор)
-          Install-Module Microsoft.PowerShell.PSResourceGet -Scope CurrentUser -Force -Verbose
-          Import-Module  Microsoft.PowerShell.PSResourceGet -Force
+            # Ставим PSResourceGet
+            Install-Module Microsoft.PowerShell.PSResourceGet -Scope CurrentUser -Force -Verbose
+            Import-Module  Microsoft.PowerShell.PSResourceGet -Force
 
-          # По докам Publish-PSResource публикует либо папку (-Path), либо готовый .nupkg
-          # Мы публикуем ИМЕННО из 'dist' (чтобы не утянулось содержимое репозитория, вроде .git/.github)
-          Publish-PSResource -Path dist -Repository PSGallery -ApiKey $env:PSGALLERY_API_KEY -Verbose
+            Write-Host "PSResource repositories:"
+            Get-PSResourceRepository | Format-Table Name,Uri,Trusted
+
+            if (-not (Get-PSResourceRepository | Where-Object Name -eq 'PSGallery')) {
+              Register-PSResourceRepository -Name PSGallery -Uri 'https://www.powershellgallery.com/api/v2' -Trusted
+              Write-Host "Registered PSGallery."
+            }
+
+            Write-Host "Publishing from: $(Resolve-Path dist)"
+            Publish-PSResource -Path dist -Repository PSGallery -ApiKey $env:PSGALLERY_API_KEY -Verbose -ErrorAction Stop
+            Write-Host "Publish completed."
+          }
+          catch {
+            Write-Host "PUBLISH ERROR:" -ForegroundColor Red
+            $_ | Format-List * -Force | Out-String | Write-Host
+            throw
+          }
+          
