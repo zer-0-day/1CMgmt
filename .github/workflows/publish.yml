@@ -3,7 +3,7 @@ run-name: "Release: ${{ github.ref_name || github.run_id }}"
 
 on:
   push:
-    tags: ['v*.*.*']
+    tags: ['v*.*.*']   # пример: v1.0.5
   workflow_dispatch:
 
 jobs:
@@ -11,54 +11,85 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Debug PWD and list files
         shell: pwsh
         run: |
-          Get-Location
-          Get-ChildItem -Force
+          Write-Host "PWD:" (Get-Location)
+          Get-ChildItem -Force | Select Name,Length,Mode
 
+      # СТАВИМ стабильный PowerShellGet v2.2.5 и обновляем версию в .psd1
       - name: Install and import PowerShellGet v2.2.5
         shell: pwsh
         run: |
           Set-PSRepository PSGallery -InstallationPolicy Trusted
           Install-Module PowerShellGet -RequiredVersion 2.2.5 -Scope CurrentUser -Force -Verbose
-          Import-Module PowerShellGet -Force
+          Import-Module  PowerShellGet -Force
           Get-Module PowerShellGet -ListAvailable | Select Name,Version | Format-Table -Auto
 
       - name: Derive version from git tag and update ModuleVersion (PSGet v2)
         shell: pwsh
         env:
-          GIT_TAG: ${{ github.ref_name }}
+          GIT_TAG: ${{ github.ref_name }}   # например, v1.0.5
         run: |
           try {
             Write-Host "Ref name: $env:GIT_TAG"
             $version = $env:GIT_TAG -replace '^v',''
-            if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Git tag '$($env:GIT_TAG)' must look like v1.2.3" }
+            if ($version -notmatch '^\d+\.\d+\.\d+$') {
+              throw "Git tag '$($env:GIT_TAG)' must look like v1.2.3"
+            }
 
             $psd1 = Join-Path $PWD '1CMgmt.psd1'
             if (-not (Test-Path $psd1)) { throw "Manifest not found: $psd1 (PWD: $PWD)" }
 
+            # В PowerShellGet v2 это «родной» cmdlet, не прокси
             Update-ModuleManifest -Path $psd1 -ModuleVersion $version -ErrorAction Stop
-            Write-Host "ModuleVersion set to $version via PowerShellGet v2"
+            Write-Host "ModuleVersion set to $version"
 
             Test-ModuleManifest -Path $psd1 | Format-List * | Out-String | Write-Host
-          } catch {
+          }
+          catch {
             $_ | Format-List * -Force | Out-String | Write-Host
             throw
           }
 
+      # СБОРКА «ЧИСТОЙ» ПАПКИ ДЛЯ ПУБЛИКАЦИИ
+      - name: Stage clean folder (dist) for publish
+        shell: pwsh
+        run: |
+          # Чистим/создаём dist
+          Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path dist | Out-Null
+
+          # Копируем ключевые файлы модуля
+          robocopy . dist 1CMgmt.psd1 1CMgmt.psm1 README.md LICENSE /NFL /NDL
+          if ($LASTEXITCODE -gt 7) { throw "robocopy(1) failed with $LASTEXITCODE" }
+
+          # Копируем Public/ и Private/ (рекурсивно), исключая служебные каталоги и файлы
+          robocopy . dist /MIR /XD .git .github dist .vscode `
+            /S /XD test tests Test Tests `
+            /XF 1CMgmt.nuspec PSGetModuleInfo.xml .gitignore .gitattributes
+
+          # robocopy использует битовую маску кодов, 0–7 считаются success
+          if ($LASTEXITCODE -gt 7) { throw "robocopy(2) failed with $LASTEXITCODE" }
+
+          Write-Host "Staged content:"
+          Get-ChildItem -Recurse dist | Select FullName
+
+      # ПУБЛИКАЦИЯ: современный PSResourceGet → Publish-PSResource
       - name: Publish to PSGallery (PSResourceGet)
         shell: pwsh
         env:
           PSGALLERY_API_KEY: ${{ secrets.PSGALLERY_API_KEY }}
         run: |
           if (-not $env:PSGALLERY_API_KEY) { throw "Missing PSGALLERY_API_KEY secret" }
-          # Публикация — современным Publish-PSResource
-          if (-not (Get-PSResourceRepository | Where-Object Name -eq 'PSGallery')) {
-            Register-PSResourceRepository -Name PSGallery -Uri 'https://www.powershellgallery.com/api/v2' -Trusted
-          }
+
+          # Ставим и импортируем PSResourceGet (современный публикатор)
           Install-Module Microsoft.PowerShell.PSResourceGet -Scope CurrentUser -Force -Verbose
-          Import-Module Microsoft.PowerShell.PSResourceGet -Force
-          Publish-PSResource -Path . -Repository PSGallery -ApiKey $env:PSGALLERY_API_KEY -Verbose
+          Import-Module  Microsoft.PowerShell.PSResourceGet -Force
+
+          # По докам Publish-PSResource публикует либо папку (-Path), либо готовый .nupkg
+          # Мы публикуем ИМЕННО из 'dist' (чтобы не утянулось содержимое репозитория, вроде .git/.github)
+          Publish-PSResource -Path dist -Repository PSGallery -ApiKey $env:PSGALLERY_API_KEY -Verbose
