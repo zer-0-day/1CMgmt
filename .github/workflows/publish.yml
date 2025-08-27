@@ -19,18 +19,18 @@ jobs:
           Get-Location
           Get-ChildItem -Force
 
-      - name: Install and import PSResourceGet (pin)
+      - name: Install and import PowerShellGet v2.2.5
         shell: pwsh
         run: |
           Set-PSRepository PSGallery -InstallationPolicy Trusted
-          Install-Module Microsoft.PowerShell.PSResourceGet -RequiredVersion 1.0.6 -Scope CurrentUser -Force -Verbose
-          Import-Module Microsoft.PowerShell.PSResourceGet -Force
-          Get-Module Microsoft.PowerShell.PSResourceGet -ListAvailable | Select Name,Version | Format-Table -Auto
+          Install-Module PowerShellGet -RequiredVersion 2.2.5 -Scope CurrentUser -Force -Verbose
+          Import-Module PowerShellGet -Force
+          Get-Module PowerShellGet -ListAvailable | Select Name,Version | Format-Table -Auto
 
-      - name: Derive version from git tag and update ModuleVersion
+      - name: Derive version from git tag and update ModuleVersion (PSGet v2)
         shell: pwsh
         env:
-          GIT_TAG: ${{ github.ref_name }}   # e.g. v1.2.3
+          GIT_TAG: ${{ github.ref_name }}
         run: |
           try {
             Write-Host "Ref name: $env:GIT_TAG"
@@ -40,9 +40,8 @@ jobs:
             $psd1 = Join-Path $PWD '1CMgmt.psd1'
             if (-not (Test-Path $psd1)) { throw "Manifest not found: $psd1 (PWD: $PWD)" }
 
-            Import-Module Microsoft.PowerShell.PSResourceGet -Force
-            Update-PSModuleManifest -Path $psd1 -ModuleVersion $version -ErrorAction Stop
-            Write-Host "ModuleVersion set to $version"
+            Update-ModuleManifest -Path $psd1 -ModuleVersion $version -ErrorAction Stop
+            Write-Host "ModuleVersion set to $version via PowerShellGet v2"
 
             Test-ModuleManifest -Path $psd1 | Format-List * | Out-String | Write-Host
           } catch {
@@ -50,13 +49,16 @@ jobs:
             throw
           }
 
-      - name: Publish to PSGallery
+      - name: Publish to PSGallery (PSResourceGet)
         shell: pwsh
         env:
           PSGALLERY_API_KEY: ${{ secrets.PSGALLERY_API_KEY }}
         run: |
           if (-not $env:PSGALLERY_API_KEY) { throw "Missing PSGALLERY_API_KEY secret" }
+          # Публикация — современным Publish-PSResource
           if (-not (Get-PSResourceRepository | Where-Object Name -eq 'PSGallery')) {
             Register-PSResourceRepository -Name PSGallery -Uri 'https://www.powershellgallery.com/api/v2' -Trusted
           }
+          Install-Module Microsoft.PowerShell.PSResourceGet -Scope CurrentUser -Force -Verbose
+          Import-Module Microsoft.PowerShell.PSResourceGet -Force
           Publish-PSResource -Path . -Repository PSGallery -ApiKey $env:PSGALLERY_API_KEY -Verbose
