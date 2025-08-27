@@ -1,35 +1,48 @@
 ﻿<#
     .SYNOPSIS
-        Подгтовка директории с дистрибутивами
-	    .DESCRIPTION
-        Подготовка директории с дистрибутивами. Распаковка архивов, перенос в директорию, соответствующую требованиям "номер версии\сервер(клиент)\разрядность"
-    #>
+        Подготовка директории с дистрибутивами
+
+    .DESCRIPTION
+        Подготовка директории с дистрибутивами. Распаковка серверных архивов
+        формата windows64full_8_3_xx_xxxx.rar (например: windows64full_8_3_22_1704.rar)
+        и перенос содержимого в структуру:
+            <1cv8.adm>\<версия>\Server\64
+
+        Функция ищет архивы ИСКЛЮЧИТЕЛЬНО серверного формата windows64full_*.rar
+        в корне каталога дистрибутивов (Find-1CDistroFolder → обычно 1cv8.adm).
+        Клиентские архивы/папки (windows_*) игнорируются.
+
+        На выходе возвращает объект с полями:
+          VersionString, Version ([Version]), Arch ('64'), Path (путь к распакованной папке).
+#>
 function New-1CDistroPackage {
     if (Find-1CDistroFolder) {
-        Write-Host "Тестирование предпоготовки дистрибутивов" -ForegroundColor Cyan
+        Write-Host "Тестирование предподготовки дистрибутивов" -ForegroundColor Cyan
 
-        # Получаем основную папку с дистрибутивами (например, X:\1cv8.adm)
+        # Основная папка с дистрибутивами (например, X:\1cv8.adm)
         $DistrDirectory = Find-1CDistroFolder
-        if (-not (Test-Path $DistrDirectory)) {
+        if (-not (Test-Path -LiteralPath $DistrDirectory)) {
             Write-Error "Папка с дистрибутивами не найдена: $DistrDirectory"
             return
         }
 
-        # Получаем все элементы, начинающиеся с "windows" (папки и архивы)
-        $distributionItems = Get-ChildItem -Path $DistrDirectory | Where-Object { $_.Name -like "windows*" }
+        # Ищем ТОЛЬКО серверные архивы .rar вида windows64full_8_3_*.rar
+        $distributionItems = Get-ChildItem -LiteralPath $DistrDirectory -Filter 'windows64full_8_3_*.rar' -File -ErrorAction SilentlyContinue
 
-        # Массив для хранения информации по всем обработанным дистрибутивам
+        if (-not $distributionItems -or $distributionItems.Count -eq 0) {
+            Write-Error "В '$DistrDirectory' не найдено серверных архивов вида windows64full_8_3_xx_xxxx.rar (например: windows64full_8_3_22_1704.rar)."
+            return
+        }
+
         $results = @()
 
         foreach ($item in $distributionItems) {
-            # Определяем имя элемента для парсинга (для файлов берем BaseName, для папок – Name)
-            $itemName = if ($item.PSIsContainer) { $item.Name } else { $item.BaseName }
+            # Для архивов берём BaseName без расширения
+            $itemName = $item.BaseName
 
-            # Парсим имя: ожидаемые форматы:
-            # 64‑бит: windows64full_8_3_22_1709
-            # 32‑бит: windows_8_3_22_1709
-            if ($itemName -match "^windows(?<arch>64full)?_(?<version>\d+_\d+_\d+_\d+)$") {
-                $arch = if ($matches['arch']) { "64" } else { "36" }
+            # Ожидаемый формат имени: windows64full_8_3_22_1704
+            if ($itemName -match '^windows64full_(?<version>\d+_\d+_\d+_\d+)$') {
+                $arch = '64'  # сервер — всегда 64-бит
                 $versionStr = $matches['version'] -replace '_', '.'
                 try {
                     $versionObj = [Version]$versionStr
@@ -40,65 +53,38 @@ function New-1CDistroPackage {
                 }
             }
             else {
-                Write-Warning "Папка или архив '$itemName' не соответствует ожидаемому формату. Пропускаем."
+                Write-Warning "Архив '$itemName' не соответствует ожидаемому формату windows64full_8_3_xx_xxxx. Пропускаем."
                 continue
             }
 
-            # Формируем целевую структуру внутри основной папки:
-            # - Папка с номером версии, внутри которой должна быть папка "Server",
-            #   а в ней – подпапка с разрядностью (64 для 64‑бит, 36 для 32‑бит)
+            # Формируем целевую структуру:
+            # <1cv8.adm>\<версия>\Server\64
             $targetVersionFolder = Join-Path -Path $DistrDirectory -ChildPath ("{0}\Server" -f $versionStr)
             $targetSubFolder     = Join-Path -Path $targetVersionFolder -ChildPath $arch
 
-            # Если каталог назначения не существует, создаём его
-            if (-not (Test-Path $targetSubFolder)) {
+            if (-not (Test-Path -LiteralPath $targetSubFolder)) {
                 New-Item -ItemType Directory -Path $targetSubFolder -Force | Out-Null
             }
 
-            if ($item.PSIsContainer) {
-                # Если элемент – папка, используем её содержимое
-                $sourceFolder = $item.FullName
+            # Распаковываем RAR (требуется 7-Zip)
+            $sevenZipPath = "C:\Program Files\7-Zip\7z.exe"
+            if (-not (Test-Path -LiteralPath $sevenZipPath)) {
+                Write-Error "7-Zip не найден по пути '$sevenZipPath'. Невозможно извлечь RAR-архив."
+                continue
+            }
 
-                Write-Host "Копирование содержимого папки '$itemName' в '$targetSubFolder'" -ForegroundColor Yellow
-                Copy-Item -Path "$sourceFolder\*" -Destination $targetSubFolder -Force -Recurse
+            # Если целевой каталог уже не пуст — пропускаем извлечение
+            $targetNotEmpty = (Test-Path -LiteralPath $targetSubFolder) -and ((Get-ChildItem -LiteralPath $targetSubFolder -Force | Measure-Object).Count -gt 0)
+            if ($targetNotEmpty) {
+                Write-Host "Каталог '$targetSubFolder' уже содержит файлы. Извлечение '$($item.Name)' пропускается." -ForegroundColor DarkYellow
             }
             else {
-                # Если элемент – файл (архив), проверяем расширение
-                if ($item.Extension -ieq ".zip" -or $item.Extension -ieq ".rar") {
-                    # Если целевой каталог уже существует и не пуст, пропускаем извлечение
-                    $targetNotEmpty = (Test-Path $targetSubFolder) -and ((Get-ChildItem -Path $targetSubFolder -Force | Measure-Object).Count -gt 0)
-                    if ($targetNotEmpty) {
-                        Write-Host "Каталог '$targetSubFolder' уже существует и содержит файлы. Извлечение архива '$($item.Name)' пропускается." -ForegroundColor DarkYellow
-                    }
-                    else {
-                        if ($item.Extension -ieq ".zip") {
-                            Write-Host "Извлекаем ZIP-архив '$($item.Name)' непосредственно в '$targetSubFolder'" -ForegroundColor Yellow
-                            Expand-Archive -Path $item.FullName -DestinationPath $targetSubFolder -Force
-                        }
-                        elseif ($item.Extension -ieq ".rar") {
-                            Write-Host "Извлекаем RAR-архив '$($item.Name)' непосредственно в '$targetSubFolder'" -ForegroundColor Yellow
-                            $sevenZipPath = "C:\Program Files\7-Zip\7z.exe"
-                            if (Test-Path $sevenZipPath) {
-                                & $sevenZipPath x $item.FullName -o"$targetSubFolder" -y | Out-Null
-                            }
-                            else {
-                                Write-Error "7-Zip не найден по пути '$sevenZipPath'. Невозможно извлечь RAR-архив."
-                                continue
-                            }
-                        }
-                    }
-                    # После извлечения для архивов считаем, что содержимое находится в $targetSubFolder
-                    $sourceFolder = $targetSubFolder
-                }
-                else {
-                    Write-Warning "Файл '$($item.Name)' не является распознаваемым архивом. Пропускаем."
-                    continue
-                }
+                Write-Host "Извлекаем RAR-архив '$($item.Name)' в '$targetSubFolder'" -ForegroundColor Yellow
+                & $sevenZipPath x $item.FullName -o"$targetSubFolder" -y | Out-Null
             }
 
-            Write-Host "Обработка '$itemName' завершена. Содержимое находится в '$targetSubFolder'" -ForegroundColor Green
+            Write-Host "Обработка '$itemName' завершена. Содержимое: '$targetSubFolder'" -ForegroundColor Green
 
-            # Сохраняем информацию об обработанном дистрибутиве
             $results += [PSCustomObject]@{
                 VersionString = $versionStr
                 Version       = $versionObj
@@ -108,16 +94,15 @@ function New-1CDistroPackage {
         }
 
         if ($results.Count -eq 0) {
-            Write-Error "Не найдено ни одной подходящей папки или архива с дистрибутивами."
+            Write-Error "Не удалось подготовить ни одного серверного дистрибутива."
             return
         }
 
-        # Выбираем объект с максимальной (последней) версией
+        # Возвращаем объект с максимальной версией
         $latest = $results | Sort-Object Version -Descending | Select-Object -First 1
-
         return $latest
     }
-        else {
-            throw "Папка с дистрибутивами не найдена"
-        }
+    else {
+        throw "Папка с дистрибутивами не найдена"
+    }
 }

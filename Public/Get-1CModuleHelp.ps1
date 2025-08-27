@@ -1,15 +1,23 @@
-﻿<#
+﻿function Get-1CModuleHelp {
+    <#
     .SYNOPSIS
-        Описание функций модуля 1CMgmt
-	    .DESCRIPTION
-        Описание функций модуля 1CMgmt
-	    This module is an example of what a well documented function could look.
-	    .LINK
-       
+        Отображает справку по модулю 1CMgmt.
+    .DESCRIPTION
+        Выводит содержимое README.md из корня модуля.
+        Если файл отсутствует — предлагает воспользоваться Get-Help для отдельных функций.
     #>
-function Get-1CModuleHelp {
-    Write-Host "Список функций модуля" -ForegroundColor Green -BackgroundColor Black
-    Get-Content 'C:\Program Files\WindowsPowerShell\Modules\1CMgmt\0.4\1CMgmt.md' 
-    Write-Host "Для получения справки по функции наберите Get-Help <Имя функции>, в отдельном окне Powershell" -ForegroundColor Green -BackgroundColor Black
-    
+    Write-Host "Справка по модулю 1CMgmt" -ForegroundColor Green -BackgroundColor Black
+
+    $moduleBase = $MyInvocation.MyCommand.Module.ModuleBase
+    $readmePath = Join-Path $moduleBase 'README.md'
+
+    if (Test-Path $readmePath) {
+        Get-Content $readmePath -Raw
+    }
+    else {
+        Write-Host "README.md не найден в каталоге модуля." -ForegroundColor Yellow
+    }
+
+    Write-Host "`nДля получения справки по отдельной функции используйте:" -ForegroundColor Green
+    Write-Host "Get-Help <Имя функции> -Detailed" -ForegroundColor Green
 }

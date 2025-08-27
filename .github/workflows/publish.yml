@@ -1,0 +1,54 @@
+name: Publish to PowerShell Gallery
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'  # Пример: v0.9.3
+
+jobs:
+  publish:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PSResourceGet (Publish-PSResource)
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module Microsoft.PowerShell.PSResourceGet -Scope CurrentUser -Force -Verbose
+          Import-Module Microsoft.PowerShell.PSResourceGet -Force
+
+      - name: Derive version from git tag and update ModuleVersion
+        shell: pwsh
+        env:
+          GIT_TAG: ${{ github.ref_name }}   # e.g. v1.2.3
+        run: |
+          $version = $env:GIT_TAG -replace '^v',''
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            throw "Git tag '$($env:GIT_TAG)' must look like v1.2.3"
+          }
+
+          # Обновляем ModuleVersion корректно, штатной командой PSResourceGet:
+          Update-PSModuleManifest -Path '1CMgmt.psd1' -ModuleVersion $version
+          Write-Host "ModuleVersion set to $version"
+
+      - name: Validate manifest
+        shell: pwsh
+        run: |
+          Test-ModuleManifest -Path '1CMgmt.psd1' | Format-List * | Out-String | Write-Host
+
+      - name: Publish to PSGallery
+        shell: pwsh
+        env:
+          PSGALLERY_API_KEY: ${{ secrets.PSGALLERY_API_KEY }}
+        run: |
+          if (-not $env:PSGALLERY_API_KEY) { throw "Missing PSGALLERY_API_KEY secret" }
+
+          # Явно регистрировать PSGallery обычно не нужно, но на всякий случай:
+          if (-not (Get-PSResourceRepository | Where-Object Name -eq 'PSGallery')) {
+            Register-PSResourceRepository -Name PSGallery -Uri 'https://www.powershellgallery.com/api/v2' -Trusted
+          }
+
+          Publish-PSResource -Path . -Repository PSGallery -ApiKey $env:PSGALLERY_API_KEY -Verbose

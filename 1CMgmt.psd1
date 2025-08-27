@@ -3,7 +3,7 @@
     RootModule        = '1CMgmt.psm1'
 
     # Версия модуля
-    ModuleVersion     = '0.8.1'
+    ModuleVersion     = '1.0.1'
 
     # Уникальный идентификатор
     GUID              = 'c70c35ba-027d-4cbd-8998-e8c7215c9af9'
