@@ -4,14 +4,20 @@
 
 .DESCRIPTION
     Функция находит каталог дистрибутива через -SetupPath или New-1CDistroPackage.
-    Если задан -SetupPath (папка или корень):
-        • находит архив windows64full_8_3_xx_xxxx.rar (рекурсивно при корне);
-        • копирует архив в 1Cv8.adm.
-    Далее: через New-1CDistroPackage распаковывает, затем удаляет архив из 1Cv8.adm.
-    Потом установка MSI (/qn, /norestart), MST-применение, регистрация DLL, обновление current.
+    Если задан -SetupPath (папка версии или корень с подкаталогами версий):
+        • ищет архив windows64full_8_3_xx_xxxx.rar (при корне — рекурсивно);
+        • копирует найденный архив в 1Cv8.adm.
+    Далее через New-1CDistroPackage распаковывает дистрибутив,
+    после успешной распаковки удаляет соответствующий архив из 1Cv8.adm.
+
+    Установка MSI выполняется в тихом режиме (/qn, опционально /norestart),
+    с применением MST (adminstallrelogon.mst;1049.mst — если присутствуют),
+    и с явным перечислением компонентов (SERVER, SERVERCLIENT, и т.д.)
+    для гарантированного развёртывания серверной части и средств администрирования.
 
 .PARAMETER SetupPath
-    См. описание выше.
+    Путь к каталогу/корню с дистрибутивами (можно UNC).
+    Если не указан — установка из последнего подготовленного пакета (New-1CDistroPackage).
 
 .PARAMETER Quiet
     Тихая установка (/qn). По умолчанию $true.
@@ -20,8 +26,8 @@
     Без перезагрузки (/norestart). По умолчанию $true.
 
 .NOTES
-    • После подготовки дистрибутива удаляем архив из 1Cv8.adm (Remove-Item).  
-      (Remove-Item надёжно удаляет файл — после выполнения распаковки архив необязателен.)  [oai_citation:0‡reddit.com](https://www.reddit.com/r/PowerShell/comments/181kh0a/moveitem_makes_copies_and_removeitem_doesnt_work/?utm_source=chatgpt.com) [oai_citation:1‡learn.microsoft.com](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.management/remove-item?view=powershell-7.5&utm_source=chatgpt.com)
+    • Рекомендуемые MST: adminstallrelogon.mst + 1049.mst (русский язык).  [oai_citation:4‡mihanik.net](https://www.mihanik.net/tihaya-ustanovka-1spredpriyatiya-8-x/?utm_source=chatgpt.com) [oai_citation:5‡Форум ИТ специалистов](https://sysadmins.online/threads/8321/?utm_source=chatgpt.com)
+    • Ключи msiexec: /i, /qn, /norestart — см. документацию Microsoft.  [oai_citation:6‡Microsoft Learn](https://learn.microsoft.com/en-us/windows/win32/msi/standard-installer-command-line-options?utm_source=chatgpt.com)
 #>
 function Install-1CPlatform {
     [CmdletBinding()]
@@ -38,16 +44,18 @@ function Install-1CPlatform {
         return
     }
 
-    # --- SetupPath обработка, архив копируется в 1Cv8.adm ---
+    # --- Если указан SetupPath: найти серверный архив и скопировать в 1Cv8.adm ---
     if ($PSBoundParameters.ContainsKey('SetupPath') -and $SetupPath) {
         if (-not (Test-Path -LiteralPath $SetupPath)) {
             Write-Host "Каталог не найден: $SetupPath" -ForegroundColor Red
             return
         }
-        $leaf = Split-Path -Leaf $SetupPath
+
         $archiveFile = $null
+        $leaf = Split-Path -Leaf $SetupPath
 
         if ($leaf -match '^\d+\.\d+\.\d+\.\d+$') {
+            # Ветка конкретной версии: пробуем точное имя и общий шаблон
             $verUnderscore = $leaf -replace '\.', '_'
             $expected = Join-Path $SetupPath ("windows64full_{0}.rar" -f $verUnderscore)
             if (Test-Path -LiteralPath $expected) {
@@ -59,6 +67,7 @@ function Install-1CPlatform {
             }
         }
         else {
+            # Корень: ищем рекурсивно и берём самую свежую по номеру версии
             $cands = Get-ChildItem -LiteralPath $SetupPath -Recurse -Filter 'windows64full_8_3_*.rar' -File -ErrorAction SilentlyContinue
             if ($cands) {
                 $parsed = foreach ($f in $cands) {
@@ -89,53 +98,84 @@ function Install-1CPlatform {
         }
     }
 
-    # --- Распаковка дистрибутива ---
-    # --- Распаковка дистрибутива ---
+    # --- Подготовка распаковки ---
     $pkg = New-1CDistroPackage
     if (-not $pkg) { return }
-    $SetupPath = $pkg.Path
-    $admPath = Find-1CDistroFolder
+    $SetupPath = $pkg.Path      # путь к распакованному серверному дистрибутиву
+    $pkgVer    = $pkg.VersionString
 
     # --- Удаление RAR из 1Cv8.adm после успешной распаковки ---
-    if ($admPath -and $pkg.VersionString) {
-        $verU = $pkg.VersionString -replace '\.', '_'
+    if ($admPath -and $pkgVer) {
+        $verU = $pkgVer -replace '\.', '_'
         $rarMask = "windows64full_${verU}.rar"
-
         $rarFiles = Get-ChildItem -LiteralPath $admPath -Filter $rarMask -File -ErrorAction SilentlyContinue
         foreach ($rar in $rarFiles) {
             Write-Host "Удаляю архив: $($rar.FullName)"
-            Remove-Item -LiteralPath $rar.FullName -Force   # удаляем аккуратно, штатным cmdlet.  [oai_citation:0‡Microsoft Learn](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.management/remove-item?view=powershell-7.5&utm_source=chatgpt.com)
+            Remove-Item -LiteralPath $rar.FullName -Force
         }
     }
 
-    # --- Установка MSI ---
-    $bin = Join-Path $SetupPath '1CEnterprise 8 (x86-64).msi'
-    if (Test-Path -LiteralPath $bin) {
-        Set-Location $SetupPath
-        $params = @('/i', $bin)
-        if ($Quiet) { $params += '/qn' }
-        if ($NoRestart) { $params += '/norestart' }
+    # --- Установка MSI (явные свойства компонентов) ---
+    $msi = Join-Path $SetupPath '1CEnterprise 8 (x86-64).msi'
+    if (-not (Test-Path -LiteralPath $msi)) {
+        Write-Host "MSI не найден: $msi" -ForegroundColor Red
+        return
+    }
 
+    Push-Location $SetupPath
+    try {
+        # MST (применяем, если присутствуют)
         $admMst = Join-Path $SetupPath 'adminstallrelogon.mst'
-        $ruMst = Join-Path $SetupPath '1049.mst'
+        $ruMst  = Join-Path $SetupPath '1049.mst'
         $transforms = @()
         if (Test-Path -LiteralPath $admMst) { $transforms += $admMst }
-        if (Test-Path -LiteralPath $ruMst) { $transforms += $ruMst }
+        if (Test-Path -LiteralPath $ruMst)  { $transforms += $ruMst }
+
+        $params = @('/i', $msi)
+        if ($Quiet)     { $params += '/qn' }
+        if ($NoRestart) { $params += '/norestart' }
         if ($transforms.Count) {
             $params += "TRANSFORMS=$($transforms -join ';')"
         }
 
-        Write-Host "Установка платформы 1С — ожидайте..." -ForegroundColor Green
+        # ЯВНОЕ перечисление компонентов (важно для сервера и администрирования)
+        $props = @(
+            'DESIGNERALLCLIENTS=1',     # Конфигуратор + клиенты
+            'THICKCLIENT=1',            # Толстый клиент
+            'THINCLIENTFILE=1',         # Тонкий (файловый)
+            'THINCLIENT=1',             # Тонкий (клиент-сервер)
+            'WEBSERVEREXT=1',           # Модули расширения web-сервера
+            'SERVER=1',                 # Сервер 1С:Предприятия
+            'CONFREPOSSERVER=0',        # Сервер хранилища конфигураций (0 — не ставим)
+            'CONVERTER77=0',            # Конвертер 7.7 (0 — не ставим)
+            'SERVERCLIENT=1',           # Администрирование сервера
+            'LANGUAGES=RU'              # Язык установки — русский
+        )
+        $params += $props
+
+        Write-Host "Выполняется установка платформы 1С. Ожидайте..." -ForegroundColor Green
+        # Для диагностики можно показать состав:
+        # $params | ForEach-Object { Write-Host $_ }
+
         & msiexec.exe @params | Out-Null
 
-        # регистрация DLL
-        $dir = "C:\Program Files\1cv8\current\bin"
-        regsvr32.exe (Join-Path $dir 'comcntr.dll') -s
-        Write-Host 'comcntr.dll зарегистрирован' -ForegroundColor Green
-        regsvr32.exe (Join-Path $dir 'radmin.dll') -s
-        Write-Host 'radmin.dll зарегистрирован' -ForegroundColor Green
+        # Регистрация DLL
+        $binCurrent = "C:\Program Files\1cv8\current\bin"
+        $comcntr = Join-Path $binCurrent 'comcntr.dll'
+        $radmin  = Join-Path $binCurrent 'radmin.dll'
+        if (Test-Path -LiteralPath $comcntr) {
+            regsvr32.exe $comcntr -s
+            Write-Host 'Библиотека comcntrl зарегистрирована' -ForegroundColor Green
+        }
+        if (Test-Path -LiteralPath $radmin) {
+            regsvr32.exe $radmin -s
+            Write-Host 'Библиотека radmin зарегистрирована' -ForegroundColor Green
+        }
+    }
+    finally {
+        Pop-Location
     }
 
-    # --- Обновление ссылки current ---
+    # --- Ссылка на current ---
     New-1CCurrentPlatformLink
 }
