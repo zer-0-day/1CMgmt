@@ -41,8 +41,9 @@
     function Wait-Enter($msg = 'Готово. Enter — продолжить') { Read-Host $msg | Out-Null }
 
     function Is-Back($val) {
-        # r / R / слова назад/return
-        $v = ($val ?? '').Trim()
+        # Совместимо с PowerShell 5.1 (без оператора ??)
+        $v = if ($null -eq $val) { '' } else { $val }
+        $v = $v.Trim()
         return ($v -match '^(?i:r|назад|back|return)$')
     }
 
@@ -78,7 +79,7 @@
                     if ($ver)   { $splat.Version    = $ver }
 
                     try {
-                        Write-Host ("Install-1CServer {0}" -f ((($splat.GetEnumerator() | ForEach-Object { "-{0} `"$($splat[$_])`"" -f $_.Key }) -join ' '))) -ForegroundColor Cyan
+                        Write-Host ("Install-1CServer {0}" -f ( ($splat.GetEnumerator() | ForEach-Object { "-$($_.Key) `"$($_.Value)`"" }) -join ' ' )) -ForegroundColor Cyan
                         Install-1CServer @splat
                         Wait-Enter
                     } catch { Write-Host $_ -ForegroundColor Red; Wait-Enter "Ошибка. Enter — назад" }
@@ -117,7 +118,7 @@
                     if ($pp)    { $splat.PortPrefix = $pp }
 
                     try {
-                        Write-Host ("Start-1CServerUpgrade {0}" -f ((($splat.GetEnumerator() | ForEach-Object { "-{0} `"$($splat[$_])`"" -f $_.Key }) -join ' '))) -ForegroundColor Cyan
+                        Write-Host ("Start-1CServerUpgrade {0}" -f ( ($splat.GetEnumerator() | ForEach-Object { "-$($_.Key) `"$($_.Value)`"" }) -join ' ' )) -ForegroundColor Cyan
                         Start-1CServerUpgrade @splat
                         Wait-Enter
                     } catch { Write-Host $_ -ForegroundColor Red; Wait-Enter "Ошибка. Enter — назад" }
