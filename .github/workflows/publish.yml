@@ -20,7 +20,7 @@ jobs:
           Write-Host "PWD:" (Get-Location)
           Get-ChildItem -Force | Select Name,Length,Mode
 
-      # === Обновляем ModuleVersion в .psd1 стабильно через PowerShellGet v2.2.5 ===
+      # === Обновляем ModuleVersion в .psd1 через PowerShellGet v2.2.5 (стабильно) ===
       - name: Install and import PowerShellGet v2.2.5
         shell: pwsh
         run: |
@@ -29,7 +29,7 @@ jobs:
           Import-Module  PowerShellGet -Force
           Get-Module PowerShellGet -ListAvailable | Select Name,Version | Format-Table -Auto
 
-      - name: Derive version from git tag and update ModuleVersion (PSGet v2)
+      - name: Derive version from git tag and update ModuleVersion
         shell: pwsh
         env:
           GIT_TAG: ${{ github.ref_name }}   # напр., v1.1.0
@@ -37,26 +37,17 @@ jobs:
           try {
             Write-Host "Ref name: $env:GIT_TAG"
             $version = $env:GIT_TAG -replace '^v',''
-            if ($version -notmatch '^\d+\.\d+\.\d+$') {
-              throw "Git tag '$($env:GIT_TAG)' must look like v1.2.3"
-            }
+            if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Git tag '$($env:GIT_TAG)' must look like v1.2.3" }
 
             $psd1 = Join-Path $PWD '1CMgmt.psd1'
             if (-not (Test-Path $psd1)) { throw "Manifest not found: $psd1 (PWD: $PWD)" }
 
-            # Update-ModuleManifest (v2) правит .psd1; это не прокси к PSResourceGet v3
             Update-ModuleManifest -Path $psd1 -ModuleVersion $version -ErrorAction Stop
             Write-Host "ModuleVersion set to $version"
-
-            # Валидация манифеста
             Test-ModuleManifest -Path $psd1 | Format-List * | Out-String | Write-Host
-          }
-          catch {
-            $_ | Format-List * -Force | Out-String | Write-Host
-            throw
-          }
+          } catch { $_ | Format-List * -Force | Out-String | Write-Host; throw }
 
-      # === Стаджим «чистую» папку dist для публикации ===
+      # === Стаджим «чистую» папку dist для публикации (без .git/.github/и т.п.) ===
       - name: Stage clean folder (dist) for publish
         shell: pwsh
         run: |
@@ -67,17 +58,14 @@ jobs:
           robocopy . dist 1CMgmt.psd1 1CMgmt.psm1 README.md LICENSE /NFL /NDL
           if ($LASTEXITCODE -gt 7) { throw "robocopy(1) failed with $LASTEXITCODE" }
 
-          # 2) Рекурсивно каталоги, исключая служебные и мусор
-          robocopy . dist /MIR /S `
-            /XD .git .github dist .vscode test tests Test Tests `
-            /XF 1CMgmt.nuspec PSGetModuleInfo.xml .gitignore .gitattributes .DS_Store
+          # 2) Рекурсивно каталоги, исключая служебные и мусор (0–7 = success)
+          robocopy . dist /MIR /S /XD .git .github dist .vscode test tests Test Tests /XF 1CMgmt.nuspec PSGetModuleInfo.xml .gitignore .gitattributes .DS_Store
           if ($LASTEXITCODE -gt 7) { throw "robocopy(2) failed with $LASTEXITCODE" }
 
-          Write-Host "Staged content:"
-          Get-ChildItem -Recurse dist | Select FullName
+          Write-Host "Staged content:"; Get-ChildItem -Recurse dist | Select FullName
 
       # === Pre-check: убеждаемся, что такой версии ещё нет в PSGallery ===
-      - name: Pre-check: ensure version is not already published
+      - name: Pre-check version in PSGallery
         shell: pwsh
         env:
           GIT_TAG: ${{ github.ref_name }}
@@ -85,42 +73,25 @@ jobs:
           $version = $env:GIT_TAG -replace '^v',''
           Install-Module Microsoft.PowerShell.PSResourceGet -Scope CurrentUser -Force -Verbose
           Import-Module  Microsoft.PowerShell.PSResourceGet -Force
-
-          # Гарантируем регистрацию PSGallery (в PSResourceGet есть короткий флаг -PSGallery)
           if (-not (Get-PSResourceRepository | Where-Object Name -eq 'PSGallery')) {
-            Register-PSResourceRepository -PSGallery
+            Register-PSResourceRepository -Name PSGallery -Uri 'https://www.powershellgallery.com/api/v2' -Trusted
           }
-
           $existing = Find-PSResource -Name '1CMgmt' -Version $version -Repository PSGallery -ErrorAction SilentlyContinue
-          if ($existing) {
-            throw "Version $version already exists in PowerShell Gallery. Bump version and push a NEW tag."
-          }
+          if ($existing) { throw "Version $version already exists in PowerShell Gallery. Bump version and push a NEW tag." }
 
       # === Публикация из dist/ в PSGallery современным Publish-PSResource ===
-      - name: Publish to PSGallery (PSResourceGet)
+      - name: Publish to PSGallery
         shell: pwsh
         env:
           PSGALLERY_API_KEY: ${{ secrets.PSGALLERY_API_KEY }}
         run: |
           try {
             if (-not $env:PSGALLERY_API_KEY) { throw "Missing PSGALLERY_API_KEY secret" }
-
-            Import-Module  Microsoft.PowerShell.PSResourceGet -Force
-
-            Write-Host "PSResource repositories:"
-            Get-PSResourceRepository | Format-Table Name,Uri,Trusted
-
+            Import-Module Microsoft.PowerShell.PSResourceGet -Force
             if (-not (Get-PSResourceRepository | Where-Object Name -eq 'PSGallery')) {
-              Register-PSResourceRepository -PSGallery
-              Write-Host "Registered PSGallery."
+              Register-PSResourceRepository -Name PSGallery -Uri 'https://www.powershellgallery.com/api/v2' -Trusted
             }
-
             Write-Host "Publishing from: $(Resolve-Path dist)"
             Publish-PSResource -Path dist -Repository PSGallery -ApiKey $env:PSGALLERY_API_KEY -Verbose -ErrorAction Stop
             Write-Host "Publish completed."
-          }
-          catch {
-            Write-Host "PUBLISH ERROR:" -ForegroundColor Red
-            $_ | Format-List * -Force | Out-String | Write-Host
-            throw
-          }
+          } catch { Write-Host "PUBLISH ERROR:" -ForegroundColor Red; $_ | Format-List * -Force | Out-String | Write-Host; throw }
