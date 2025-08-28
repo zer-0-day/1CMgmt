@@ -28,7 +28,8 @@
   SecureString-пароль для RunAsUser. Если не указан — будет запрошен.
 
 .PARAMETER SetupPath
-  Необязательно. Папка версии (\\server\...\8.3.xx.xxxx) или общий «корень» (\\server\distr) — будет передан в Start-1CServerUpgrade.
+  Необязательный. Путь к каталогу с дистрибутивами (локальный или UNC).
+  Если не указан — при создании задачи будет предложено ввести путь, иначе будет использован локальный кэш “C:\1Cv8.adm”. Значение передаётся в Start-1CServerUpgrade.
 
 .PARAMETER PortPrefix
   Необязательно. Одно значение или массив префиксов (напр. 25 или @(25,35)) — будет передан в Start-1CServerUpgrade.
@@ -60,6 +61,18 @@ function New-1CServerAutoUpgradeTask {
         [ValidateSet('WindowsPowerShell','PowerShell7')]
         [string]$Shell = 'WindowsPowerShell'
     )
+
+    # Если SetupPath не передан — спросим интерактивно, по умолчанию используем локальный кэш C:\1Cv8.adm
+    if (-not $PSBoundParameters.ContainsKey('SetupPath') -or [string]::IsNullOrWhiteSpace($SetupPath)) {
+        $defaultSetup = 'C:\1Cv8.adm'
+        $inp = Read-Host -Prompt ("Укажите путь к дистрибутивам (Enter — использовать по умолчанию: $defaultSetup)")
+        if ([string]::IsNullOrWhiteSpace($inp)) {
+            $SetupPath = $defaultSetup
+            Write-Host "Путь не указан — будет использован локальный кэш: $SetupPath" -ForegroundColor Yellow
+        } else {
+            $SetupPath = $inp
+        }
+    }
 
     function ConvertFrom-SecureStringPlain {
         param([Parameter(Mandatory)][System.Security.SecureString]$Secure)
