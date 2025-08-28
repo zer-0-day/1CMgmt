@@ -52,19 +52,22 @@ jobs:
         run: |
           Remove-Item -Recurse -Force dist,out -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path dist,out | Out-Null
+
           # 1) Ключевые файлы
           robocopy . dist 1CMgmt.psd1 1CMgmt.psm1 README.md LICENSE /NFL /NDL
-          if ($LASTEXITCODE -gt 7) { throw "robocopy(1) failed with $LASTEXITCODE" }
-          # 2) Рекурсивно каталоги, исключая служебные и мусор (0–7 = success)
-          robocopy . dist /MIR /S /XD .git .github dist .vscode test tests Test Tests /XF 1CMgmt.nuspec PSGetModuleInfo.xml .gitignore .gitattributes .DS_Store
-          if ($LASTEXITCODE -gt 7) { throw "robocopy(2) failed with $LASTEXITCODE" }
-          Write-Host "Staged content:"; Get-ChildItem -Recurse dist | Select FullName
+          $code = $LASTEXITCODE
+          if ($code -ge 8) { throw "robocopy(1) failed with exit code $code" }
 
-      - name: Upload staged dist (diagnostics)
-        uses: actions/upload-artifact@v4
-        with:
-          name: dist-staged
-          path: dist
+          # 2) Рекурсивно каталоги, исключая служебные и мусор
+          robocopy . dist /MIR /S /XD .git .github dist .vscode test tests Test Tests /XF 1CMgmt.nuspec PSGetModuleInfo.xml .gitignore .gitattributes .DS_Store
+          $code = $LASTEXITCODE
+          if ($code -ge 8) { throw "robocopy(2) failed with exit code $code" }
+
+          # robocopy 0–7 = success, но это не ноль → сбросим, чтобы шаг не упал
+          $global:LASTEXITCODE = 0
+
+          Write-Host "Staged content:"
+          Get-ChildItem -Recurse dist | Select FullName
 
       # === PSResourceGet для поиска/упаковки/публикации ===
       - name: Install PSResourceGet
