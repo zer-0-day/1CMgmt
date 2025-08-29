@@ -166,7 +166,9 @@ Install-1CServer -PortPrefix 35 -Version '8.3.25.1546'
 ```
 
 # установка второго сервера с конкретной версией из сетевой папки:
+```powershell
 Install-1CServer -PortPrefix 25 -SetupPath "\\server\data\technical\1СПлатформы\1Cv83\8.3.22.1704"
+```
 
 > Для префикса `15` создаётся служба `… Current`, для остальных — `… Current25`, `… Current35` и т.д.
 
