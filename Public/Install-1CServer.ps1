@@ -1,31 +1,31 @@
 ﻿<#
 .SYNOPSIS
-    Простой установщик сервера 1С с выбором префикса портов. Поддерживает -SetupPath, -Version и -Credential.
+    Устанавливает сервер 1С с заданным префиксом портов; поддерживает -SetupPath, -Version и -Credential.
 
 .DESCRIPTION
-    1) Ставит/обновляет платформу (Install-1CPlatform; при -SetupPath — из указанного каталога/корня, при -Version — строго указанный билд).
-    2) Настраивает учётку USR1CV8 (принимает -Credential, иначе: passfile → интерактивный запрос).
-    3) Создаёт каталог srvinfo(XX), настраивает ACL.
+    1) Ставит/обновляет платформу (Install-1CPlatform).
+       • Если -SetupPath указывает на распакованный дистрибутив (есть MSI) — архив НЕ ищется.
+       • Если задана -Version — ставится строго этот билд (проверка).
+    2) Готовит учётку USR1CV8 (Credential → passfile → интерактив).
+    3) Создаёт каталог данных службы srvinfoXX (даже для 15 → srvinfo15).
     4) Регистрирует comcntr.dll и radmin.dll из выбранной папки bin.
-    5) Создаёт службу агента с портами на базе префикса.
-
-    ИМЕНА СЛУЖБ (без версий):
-      • Имя службы зависит ТОЛЬКО от префикса портов (параметр -PortPrefix). Параметр -Version на имя не влияет.
-        PortPrefix 15  → '1C:Enterprise 8.3 Server Agent Current'
-        PortPrefix !=15 → '1C:Enterprise 8.3 Server Agent Current<PortPrefix>' (например Current25)
-
-    ПУТЬ К БИНАРНИКАМ
-      • Если -Version = 'current' (или не задан), путь службы указывает на '...\\current\\bin'.
-      • Если задана конкретная версия (например 8.3.22.1704), путь службы указывает на '...\\8.3.22.1704\\bin'.
+    5) Создаёт службу агента.
+       Имя службы зависит ТОЛЬКО от PortPrefix:
+         15  → '1C:Enterprise 8.3 Server Agent Current'
+         25  → '1C:Enterprise 8.3 Server Agent Current25'
+         35  → '1C:Enterprise 8.3 Server Agent Current35'
+       Путь к ragent.exe зависит от Version:
+         Version='current' (или не задан) → ...\current\bin\ragent.exe
+         Иная Version (8.3.x.x)           → ...\<Version>\bin\ragent.exe
 
 .PARAMETER PortPrefix
-    Первые две цифры портов (например 15, 25, 35). По умолчанию 15.
+    Первые две цифры портов (15/25/35/...). По умолчанию 15.
 
 .PARAMETER Version
-    'current' (по умолчанию) или конкретная версия (например '8.3.22.1704').
+    'current' (по умолчанию) или конкретная версия (напр. '8.3.22.1704').
 
 .PARAMETER SetupPath
-    Папка версии или общий корень с архивами. Передаётся в Install-1CPlatform.
+    Папка версии (распакованной) или общий корень с архивами (UNC/локальный). Передаётся в Install-1CPlatform.
 
 .PARAMETER Credential
     PSCredential для USR1CV8. Если не задан — будет использован passfile или интерактивный запрос пароля.
@@ -34,6 +34,7 @@
     Install-1CServer -PortPrefix 25 -Version 8.3.22.1704 -SetupPath "\\server\\distr"
 #>
 function Install-1CServer {
+    [CmdletBinding()]
     param(
         [ValidatePattern('^\d{2}$')]
         [string]$PortPrefix = '15',
@@ -46,137 +47,124 @@ function Install-1CServer {
         [System.Management.Automation.PSCredential]$Credential
     )
 
-    # 0) Если переданы SetupPath + конкретная Version — обязательно найдём нужный архив, иначе прервём установку
-    $ResolvedSetupPath = $SetupPath
-    if ($SetupPath -and $Version -ne 'current')
-    {
-        if (-not (Test-Path -LiteralPath $SetupPath)) {
-            throw "Каталог не найден: $SetupPath"
+    # Требуются права администратора
+    if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
+        ).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
+        throw "Требуются права администратора."
+    }
+
+    # Если задан SetupPath, проверим — это распакованный дистрибутив?
+    $ResolvedSetup = $SetupPath
+    if ($SetupPath -and (Test-Path -LiteralPath $SetupPath)) {
+        $msiName = '1CEnterprise 8 (x86-64).msi'
+        $msiProbe = Join-Path $SetupPath $msiName
+        if (-not (Test-Path -LiteralPath $msiProbe)) {
+            $msiProbe = Get-ChildItem -LiteralPath $SetupPath -Recurse -Filter $msiName -File -ErrorAction SilentlyContinue |
+                        Select-Object -First 1 | ForEach-Object FullName
         }
-
-        $vU = ($Version -replace '\.','_')
-        $wanted = "windows64full_$vU.rar"
-        $leaf = Split-Path -Leaf $SetupPath
-
-        $hit = $null
-        try {
-            if ($leaf -eq $Version) {
-                # Ожидаем архив прямо в этой папке
-                $hit = Get-ChildItem -LiteralPath $SetupPath -Filter $wanted -File -ErrorAction SilentlyContinue | Select-Object -First 1
-                if (-not $hit) {
-                    # На всякий случай — проверим рекурсивно внутри версии
-                    $hit = Get-ChildItem -LiteralPath $SetupPath -Recurse -Filter $wanted -File -ErrorAction SilentlyContinue | Select-Object -First 1
-                }
-            } else {
-                # Общий корень — ищем рекурсивно
-                $hit = Get-ChildItem -LiteralPath $SetupPath -Recurse -Filter $wanted -File -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($msiProbe) {
+            # SetupPath указывает на распакованную структуру → использовать её напрямую
+            $ResolvedSetup = Split-Path -Path $msiProbe -Parent
+            Write-Host "Использую уже распакованный дистрибутив: $ResolvedSetup" -ForegroundColor Cyan
+        }
+        elseif ($Version -ne 'current') {
+            # Если не распаковано, но версия задана — убедимся, что архив нужной версии существует, иначе прервёмся.
+            $vU = $Version -replace '\.','_'
+            $wanted = "windows64full_$vU.rar"
+            $hit = Get-ChildItem -LiteralPath $SetupPath -Recurse -Filter $wanted -File -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $hit) {
+                throw "Не найден архив '$wanted' в '$SetupPath'. Установка прервана — версия должна соответствовать -Version."
             }
-        } catch {
-            throw "Ошибка при поиске архива '$wanted' в '$SetupPath': $($_.Exception.Message)"
-        }
-
-        if ($hit) {
-            $ResolvedSetupPath = $hit.DirectoryName
-            Write-Host "Найдена версия $Version по архиву '$wanted'. Использую каталог: $ResolvedSetupPath" -ForegroundColor Cyan
-        } else {
-            throw "Не найден архив '$wanted' в '$SetupPath'. Установка прервана по требованию — версия должна соответствовать параметру -Version."
+            # Пусть Install-1CPlatform сам выполнит копирование/распаковку из архива.
         }
     }
 
-    # 1) Платформа — обязательно прокидываем -Version, если он указан
-    if ($ResolvedSetupPath -and $Version -ne 'current') {
-        Install-1CPlatform -SetupPath $ResolvedSetupPath -Version $Version
-    }
-    elseif ($ResolvedSetupPath) {
-        Install-1CPlatform -SetupPath $ResolvedSetupPath
-    }
-    elseif ($SetupPath -and $Version -ne 'current') {
+    # Платформа (обязательно прокидываем -Version, если он задан)
+    if ($ResolvedSetup -and $Version -ne 'current') {
+        Install-1CPlatform -SetupPath $ResolvedSetup -Version $Version
+    } elseif ($ResolvedSetup) {
+        Install-1CPlatform -SetupPath $ResolvedSetup
+    } elseif ($SetupPath -and $Version -ne 'current') {
         Install-1CPlatform -SetupPath $SetupPath -Version $Version
-    }
-    elseif ($SetupPath) {
+    } elseif ($SetupPath) {
         Install-1CPlatform -SetupPath $SetupPath
-    }
-    else {
-        if ($Version -ne 'current') {
-            Install-1CPlatform -Version $Version
-        } else {
-            Install-1CPlatform
-        }
+    } else {
+        if ($Version -ne 'current') { Install-1CPlatform -Version $Version } else { Install-1CPlatform }
     }
 
-    # 2) Учётка USR1CV8 и креды
-    $username  = "$env:COMPUTERNAME\USR1CV8"
+    # Учётка USR1CV8 и креды
+    $machine = $env:COMPUTERNAME
+    $userSam = "$machine\USR1CV8"
     $localUser = Get-LocalUser -Name 'USR1CV8' -ErrorAction SilentlyContinue
 
     if (-not $Credential) {
         if (Test-Path 'C:\passfile.txt') {
-            $secure = Get-Content 'C:\passfile.txt' | ConvertTo-SecureString
-            $Credential = [pscredential]::new($username, $secure)
+            $sec = Get-Content 'C:\passfile.txt' | ConvertTo-SecureString
+            $Credential = [pscredential]::new($userSam, $sec)
             Remove-Item 'C:\passfile.txt' -Force -ErrorAction SilentlyContinue
         }
         elseif ($localUser) {
-            $secure = Read-Host -Prompt "Введите пароль для $username" -AsSecureString
-            $Credential = [pscredential]::new($username, $secure)
+            $sec = Read-Host -Prompt "Введите пароль для $userSam" -AsSecureString
+            $Credential = [pscredential]::new($userSam, $sec)
         }
         else {
             New-1CServiceUser
             if (Test-Path 'C:\passfile.txt') {
-                $secure = Get-Content 'C:\passfile.txt' | ConvertTo-SecureString
-                $Credential = [pscredential]::new($username, $secure)
+                $sec = Get-Content 'C:\passfile.txt' | ConvertTo-SecureString
+                $Credential = [pscredential]::new($userSam, $sec)
                 Remove-Item 'C:\passfile.txt' -Force -ErrorAction SilentlyContinue
             } else {
-                $secure = Read-Host -Prompt "Введите пароль для $username" -AsSecureString
-                $Credential = [pscredential]::new($username, $secure)
+                $sec = Read-Host -Prompt "Введите пароль для $userSam" -AsSecureString
+                $Credential = [pscredential]::new($userSam, $sec)
             }
         }
     }
 
-    # 3) Порты
+    # Порты
     $BasePort  = "{0}41" -f $PortPrefix
     $CtrlPort  = "{0}40" -f $PortPrefix
     $RangePort = "{0}60:{0}91" -f $PortPrefix
 
-    # 4) Пути и файлы: выбираем bin по Version
-    $ProgramFiles1C = 'C:\Program Files\1cv8'
+    # Пути: бинари зависят от Version; каталог данных службы ВСЕГДА с суффиксом PortPrefix (даже для 15 → srvinfo15)
+    $pf1c = 'C:\Program Files\1cv8'
+    $srvInfoDir = "srvinfo$PortPrefix"
+    $SrvCatalog = Join-Path $pf1c $srvInfoDir
+
     $BinPath =
         if ($Version -and $Version -ne 'current') {
-            Join-Path $ProgramFiles1C (Join-Path $Version 'bin')
+            Join-Path $pf1c (Join-Path $Version 'bin')
         } else {
-            Join-Path $ProgramFiles1C (Join-Path 'current' 'bin')
+            Join-Path $pf1c (Join-Path 'current' 'bin')
         }
 
     $RunExe   = Join-Path $BinPath 'ragent.exe'
     $ComCntrl = Join-Path $BinPath 'comcntr.dll'
     $Radmin   = Join-Path $BinPath 'radmin.dll'
 
-    if ($Version -ne 'current' -and -not (Test-Path -LiteralPath $RunExe)) {
-        throw "Не найден ragent.exe для версии $Version $RunExe. Проверь, что версия установлена корректно."
+    if (-not (Test-Path -LiteralPath $RunExe)) {
+        throw "Не найден ragent.exe: $RunExe. Проверь, что нужная версия установлена."
     }
 
-    # 5) Имя службы: зависит только от PortPrefix
-    if ($PortPrefix -eq '15') {
-        $ServiceName = '1C:Enterprise 8.3 Server Agent Current'
-        $SrvinfoName = 'srvinfo'
-    }
-    else {
-        $ServiceName = "1C:Enterprise 8.3 Server Agent Current$PortPrefix"
-        $SrvinfoName = "srvinfo$PortPrefix"
+    # Имя службы зависит только от PortPrefix
+    $ServiceName = if ($PortPrefix -eq '15') {
+        '1C:Enterprise 8.3 Server Agent Current'
+    } else {
+        "1C:Enterprise 8.3 Server Agent Current$PortPrefix"
     }
 
-    # 6) Каталог и ACL
-    $SrvCatalog = Join-Path $ProgramFiles1C $SrvinfoName
+    # Каталог данных и ACL
     if (-not (Test-Path $SrvCatalog)) { New-Item -ItemType Directory -Path $SrvCatalog | Out-Null }
     $acl    = Get-Acl $SrvCatalog
-    $access = New-Object System.Security.AccessControl.FileSystemAccessRule($username,'FullControl','ContainerInherit, ObjectInherit','None','Allow')
+    $access = New-Object System.Security.AccessControl.FileSystemAccessRule($userSam,'FullControl','ContainerInherit, ObjectInherit','None','Allow')
     $acl.SetAccessRule($access)
     $acl.SetAccessRuleProtection($false,$true)
     $acl | Set-Acl $SrvCatalog
 
-    # 7) Регистрация DLL (тихо) — из выбранной папки bin
-    if (Test-Path -LiteralPath $ComCntrl) { regsvr32.exe "`"$ComCntrl`"" -s }
-    if (Test-Path -LiteralPath $Radmin)  { regsvr32.exe "`"$Radmin`""  -s }
+    # Регистрация DLL из выбранной bin
+    if (Test-Path -LiteralPath $ComCntrl) { & regsvr32.exe "`"$ComCntrl`"" -s }
+    if (Test-Path -LiteralPath $Radmin)  { & regsvr32.exe "`"$Radmin`""  -s }
 
-    # 8) Команда запуска агента
+    # Команда агента
     $ServicePath = @(
         "`"$RunExe`""
         '-srvc','-agent'
@@ -187,7 +175,7 @@ function Install-1CServer {
         '-d',       "`"$SrvCatalog`""
     ) -join ' '
 
-    # 9) Пересоздание службы
+    # Пересоздание службы
     $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
     if ($existing) {
         Stop-Service -Name $ServiceName -ErrorAction SilentlyContinue
@@ -198,5 +186,5 @@ function Install-1CServer {
     New-Service -Name $ServiceName -BinaryPathName $ServicePath -DisplayName $ServiceName -StartupType Automatic -Credential $Credential
     Start-Service -Name $ServiceName
 
-    Write-Host "OK: $ServiceName (bin=$BinPath; base=$BasePort ctrl=$CtrlPort range=$RangePort)"
+    Write-Host "OK: $ServiceName (bin=$BinPath; data=$SrvCatalog; base=$BasePort ctrl=$CtrlPort range=$RangePort)"
 }
