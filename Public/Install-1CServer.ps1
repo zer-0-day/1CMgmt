@@ -1,12 +1,12 @@
 ﻿<#
 .SYNOPSIS
-    Простой установщик сервера 1С с выбором префикса портов. Поддерживает -SetupPath и -Credential.
+    Простой установщик сервера 1С с выбором префикса портов. Поддерживает -SetupPath, -Version и -Credential.
 
 .DESCRIPTION
-    1) Ставит/обновляет платформу (Install-1CPlatform; при -SetupPath — из указанного каталога/корня).
-    2) Настраивает учётку USR1CV8 (принимает -Credential, иначе: passfile → запрос пароля).
-    3) Создаёт каталог srvinfo(XX), ACL.
-    4) Регистрирует comcntr.dll и radmin.dll.
+    1) Ставит/обновляет платформу (Install-1CPlatform; при -SetupPath — из указанного каталога/корня, при -Version — строго указанный билд).
+    2) Настраивает учётку USR1CV8 (принимает -Credential, иначе: passfile → интерактивный запрос).
+    3) Создаёт каталог srvinfo(XX), настраивает ACL.
+    4) Регистрирует comcntr.dll и radmin.dll из выбранной папки bin.
     5) Создаёт службу агента с портами на базе префикса.
 
     ИМЕНА СЛУЖБ (без версий):
@@ -15,9 +15,8 @@
         PortPrefix !=15 → '1C:Enterprise 8.3 Server Agent Current<PortPrefix>' (например Current25)
 
     ПУТЬ К БИНАРНИКАМ
-      • Путь ragent.exe в службе всегда указывает на '...\\current\\bin'. Параметр -Version влияет только на то,
-        какая версия платформы будет установлена/подготовлена (Install-1CPlatform), но НЕ влияет на имя службы
-        и путь к бинарникам в службе.
+      • Если -Version = 'current' (или не задан), путь службы указывает на '...\\current\\bin'.
+      • Если задана конкретная версия (например 8.3.22.1704), путь службы указывает на '...\\8.3.22.1704\\bin'.
 
 .PARAMETER PortPrefix
     Первые две цифры портов (например 15, 25, 35). По умолчанию 15.
@@ -84,18 +83,28 @@ function Install-1CServer {
         }
     }
 
-    # 1) Платформа (если путь разрешён — ставим строго из него)
-    if ($ResolvedSetupPath) {
+    # 1) Платформа — обязательно прокидываем -Version, если он указан
+    if ($ResolvedSetupPath -and $Version -ne 'current') {
+        Install-1CPlatform -SetupPath $ResolvedSetupPath -Version $Version
+    }
+    elseif ($ResolvedSetupPath) {
         Install-1CPlatform -SetupPath $ResolvedSetupPath
+    }
+    elseif ($SetupPath -and $Version -ne 'current') {
+        Install-1CPlatform -SetupPath $SetupPath -Version $Version
     }
     elseif ($SetupPath) {
         Install-1CPlatform -SetupPath $SetupPath
     }
     else {
-        Install-1CPlatform
+        if ($Version -ne 'current') {
+            Install-1CPlatform -Version $Version
+        } else {
+            Install-1CPlatform
+        }
     }
 
-    # 2) Учетка USR1CV8 и креды
+    # 2) Учётка USR1CV8 и креды
     $username  = "$env:COMPUTERNAME\USR1CV8"
     $localUser = Get-LocalUser -Name 'USR1CV8' -ErrorAction SilentlyContinue
 
@@ -127,24 +136,35 @@ function Install-1CServer {
     $CtrlPort  = "{0}40" -f $PortPrefix
     $RangePort = "{0}60:{0}91" -f $PortPrefix
 
-    # 4) Пути и файлы
+    # 4) Пути и файлы: выбираем bin по Version
     $ProgramFiles1C = 'C:\Program Files\1cv8'
-    $SrvinfoName    = if ($PortPrefix -eq '15') { 'srvinfo' } else { "srvinfo$PortPrefix" }
-    $SrvCatalog     = Join-Path $ProgramFiles1C $SrvinfoName
-    $BinPath        = Join-Path $ProgramFiles1C (Join-Path 'current' 'bin')  # всегда 'current\bin' для бесшовных апгрейдов
-    $RunExe         = Join-Path $BinPath 'ragent.exe'
-    $ComCntrl       = Join-Path $BinPath 'comcntr.dll'
-    $Radmin         = Join-Path $BinPath 'radmin.dll'
+    $BinPath =
+        if ($Version -and $Version -ne 'current') {
+            Join-Path $ProgramFiles1C (Join-Path $Version 'bin')
+        } else {
+            Join-Path $ProgramFiles1C (Join-Path 'current' 'bin')
+        }
 
-    # 5) Имя службы: зависит только от PortPrefix, -Version игнорируется в названии
+    $RunExe   = Join-Path $BinPath 'ragent.exe'
+    $ComCntrl = Join-Path $BinPath 'comcntr.dll'
+    $Radmin   = Join-Path $BinPath 'radmin.dll'
+
+    if ($Version -ne 'current' -and -not (Test-Path -LiteralPath $RunExe)) {
+        throw "Не найден ragent.exe для версии $Version $RunExe. Проверь, что версия установлена корректно."
+    }
+
+    # 5) Имя службы: зависит только от PortPrefix
     if ($PortPrefix -eq '15') {
         $ServiceName = '1C:Enterprise 8.3 Server Agent Current'
+        $SrvinfoName = 'srvinfo'
     }
     else {
         $ServiceName = "1C:Enterprise 8.3 Server Agent Current$PortPrefix"
+        $SrvinfoName = "srvinfo$PortPrefix"
     }
 
     # 6) Каталог и ACL
+    $SrvCatalog = Join-Path $ProgramFiles1C $SrvinfoName
     if (-not (Test-Path $SrvCatalog)) { New-Item -ItemType Directory -Path $SrvCatalog | Out-Null }
     $acl    = Get-Acl $SrvCatalog
     $access = New-Object System.Security.AccessControl.FileSystemAccessRule($username,'FullControl','ContainerInherit, ObjectInherit','None','Allow')
@@ -152,9 +172,9 @@ function Install-1CServer {
     $acl.SetAccessRuleProtection($false,$true)
     $acl | Set-Acl $SrvCatalog
 
-    # 7) Регистрация DLL (тихо)
-    regsvr32.exe "`"$ComCntrl`"" -s
-    regsvr32.exe "`"$Radmin`"" -s
+    # 7) Регистрация DLL (тихо) — из выбранной папки bin
+    if (Test-Path -LiteralPath $ComCntrl) { regsvr32.exe "`"$ComCntrl`"" -s }
+    if (Test-Path -LiteralPath $Radmin)  { regsvr32.exe "`"$Radmin`""  -s }
 
     # 8) Команда запуска агента
     $ServicePath = @(
@@ -178,5 +198,5 @@ function Install-1CServer {
     New-Service -Name $ServiceName -BinaryPathName $ServicePath -DisplayName $ServiceName -StartupType Automatic -Credential $Credential
     Start-Service -Name $ServiceName
 
-    Write-Host "OK: $ServiceName (base=$BasePort ctrl=$CtrlPort range=$RangePort)"
+    Write-Host "OK: $ServiceName (bin=$BinPath; base=$BasePort ctrl=$CtrlPort range=$RangePort)"
 }

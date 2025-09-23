@@ -1,121 +1,153 @@
 ﻿<#
 .SYNOPSIS
-    Устанавливает сервер 1С:Предприятия (служба current/currentXX).
+    Устанавливает или обновляет платформу 1С из каталога дистрибутива.
 
 .DESCRIPTION
-    Если указан -Version, ищет и копирует ТОЛЬКО архив windows64full_<версия>.rar
-    (8_3_xx_xxxx) из -SetupPath (локальный/UNC, можно корень с подкаталогами) в 1Cv8.adm,
-    распаковывает пакет и проверяет, что распаковалась ИМЕННО эта версия.
-    Если версия не совпала — останавливается с ошибкой (не ставим «не ту»).
-
-    Имя службы формируется ТОЛЬКО от PortPrefix:
-      - без PortPrefix → current (порты 15*)
-      - с PortPrefix=25 → current25 (порты 25*)
-      - с PortPrefix=35 → current35 (порты 35*), и т.д.
+    Ищет дистрибутив по заданному пути (UNC/локальный) или в 1Cv8.adm.
+    Если указан -Version — берётся строго соответствующий архив
+    windows64full_<версия>.rar (например windows64full_8_3_22_1704.rar).
+    Архив из UNC/локального пути копируется в C:\1Cv8.adm, затем выполняется распаковка
+    (New-1CDistroPackage) и установка MSI с явными компонентами сервера и администрирования.
+    После успешной распаковки соответствующий архив удаляется из 1Cv8.adm.
+    В конце создаётся ссылка "current".
 
 .PARAMETER SetupPath
-    Каталог версии или корень с версиями (локальный/UNC). Можно не указывать.
+    Корневой путь с версиями или папка конкретной версии (можно UNC).
+    При указании — поиск архива ведётся ТОЛЬКО в этом пути (без локальных fallback'ов).
 
 .PARAMETER Version
-    Точная версия, например 8.3.22.1704. ОБЯЗАТЕЛЬНО при желании ставить конкретный билд.
+    Версия в формате 8.3.xx.xxxx (например 8.3.22.1704).
+    При указании — ставим только этот билд (строгая проверка).
 
-.PARAMETER PortPrefix
-    Префикс портов из двух цифр (например 25). Необязателен. Без него — схема 15* (current).
+.PARAMETER Quiet
+    Тихая установка (/qn). По умолчанию $true.
 
-.EXAMPLE
-    Install-1CServer -SetupPath "\\server\\distr\\1Cv83" -Version 8.3.22.1704 -PortPrefix 25
+.PARAMETER NoRestart
+    Без перезагрузки (/norestart). По умолчанию $true.
 #>
-function Install-1CServer {
-    [CmdletBinding(SupportsShouldProcess)]
+function Install-1CPlatform {
+    [CmdletBinding()]
     param(
         [string]$SetupPath,
         [string]$Version,
-        [ValidatePattern('^[0-9]{2}$')]
-        [int]$PortPrefix
+        [bool]$Quiet = $true,
+        [bool]$NoRestart = $true
     )
 
-    # --- Каталог 1Cv8.adm ---
+    # --- 1) Определяем каталог 1Cv8.adm ---
     $admPath = Find-1CDistroFolder
     if (-not $admPath -or -not (Test-Path -LiteralPath $admPath)) {
-        throw "Каталог дистрибутивов 1Cv8.adm не найден."
+        Write-Host "Каталог 1Cv8.adm не найден." -ForegroundColor Red
+        return
     }
 
-    # --- Если задана конкретная версия — находим ИМЕННО её архив и копируем в 1Cv8.adm ---
-    if ($PSBoundParameters.ContainsKey('Version')) {
-        if (-not $Version -or $Version -notmatch '^\d+\.\d+\.\d+\.\d+$') {
-            throw "Некорректная версия: '$Version'. Ожидается вид 8.3.xx.xxxx"
+    # --- 2) Если передан SetupPath — ищем архив ТОЛЬКО там ---
+    $archiveFile = $null
+    if ($PSBoundParameters.ContainsKey('SetupPath') -and $SetupPath) {
+        if (-not (Test-Path -LiteralPath $SetupPath)) {
+            Write-Host "Каталог не найден: $SetupPath" -ForegroundColor Red
+            return
         }
-        $verU = $Version -replace '\.', '_'  # 8.3.22.1704 -> 8_3_22_1704
-        $wantedName = "windows64full_${verU}.rar"
 
-        $srcArchive = $null
-        if ($SetupPath) {
-            if (-not (Test-Path -LiteralPath $SetupPath)) {
-                throw "Каталог не найден: $SetupPath"
+        Write-Host "Ищу архив в указанном пути: $SetupPath" -ForegroundColor Cyan
+
+        if ($Version) {
+            # Строгое имя архива по заданной версии
+            if ($Version -notmatch '^\d+\.\d+\.\d+\.\d+$') {
+                Write-Host "Некорректная версия: '$Version' (ожидалось 8.3.xx.xxxx)" -ForegroundColor Red
+                return
             }
-            # Ищем рекурсивно только нужный архив по точному имени
-            $f = Get-ChildItem -LiteralPath $SetupPath -Recurse -Filter $wantedName -File -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($f) { $srcArchive = $f.FullName }
-        } else {
-            # Если путь не задан — пробуем, вдруг архив уже есть в 1Cv8.adm
-            $f = Get-ChildItem -LiteralPath $admPath -Filter $wantedName -File -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($f) { $srcArchive = $f.FullName }
+            $verU = $Version -replace '\.', '_'
+            $wanted = "windows64full_${verU}.rar"
+
+            $hit = Get-ChildItem -LiteralPath $SetupPath -Recurse -Filter $wanted -File -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($hit) { $archiveFile = $hit.FullName }
+        }
+        else {
+            # Без -Version берём последнюю найденную в указанном пути
+            $cands = Get-ChildItem -LiteralPath $SetupPath -Recurse -Filter 'windows64full_8_3_*.rar' -File -ErrorAction SilentlyContinue
+            if ($cands) {
+                $parsed = foreach ($f in $cands) {
+                    if ($f.BaseName -match '^windows64full_(?<v>\d+_\d+_\d+_\d+)$') {
+                        $verStr = $matches['v'] -replace '_','.'
+                        try { [PSCustomObject]@{ Version=[Version]$verStr; File=$f.FullName } } catch {}
+                    }
+                }
+                if ($parsed) {
+                    $best = $parsed | Sort-Object Version -Descending | Select-Object -First 1
+                    $archiveFile = $best.File
+                }
+            }
         }
 
-        if (-not $srcArchive) {
-            throw "Не найден архив '$wantedName' в '$SetupPath'. Укажи корректный -SetupPath или помести архив в $admPath"
+        if (-not $archiveFile) {
+            Write-Host "Архив не найден в указанном пути: $SetupPath" -ForegroundColor Red
+            return
         }
 
-        $destArchive = Join-Path $admPath $wantedName
-        if ($srcArchive -ne $destArchive) {
-            Write-Host "Копирую архив конкретной версии: '$srcArchive' → '$destArchive'"
-            Copy-Item -LiteralPath $srcArchive -Destination $destArchive -Force
+        $dest = Join-Path $admPath (Split-Path -Leaf $archiveFile)
+        if ($archiveFile -ne $dest) {
+            Write-Host "Копирую архив в 1Cv8.adm: '$archiveFile' → '$dest'" -ForegroundColor Yellow
+            Copy-Item -LiteralPath $archiveFile -Destination $dest -Force
         } else {
-            Write-Host "Архив нужной версии уже находится в 1Cv8.adm: $destArchive"
+            Write-Host "Архив уже находится в 1Cv8.adm: $dest" -ForegroundColor DarkGray
         }
     }
+    else {
+        Write-Host "SetupPath не задан — будет использован локальный кэш 1Cv8.adm." -ForegroundColor DarkGray
+    }
 
-    # --- Подготовка распаковки дистрибутива ---
+    # --- 3) Распаковка/подготовка пакета из 1Cv8.adm ---
+    Write-Host "Тестирование/подготовка дистрибутива (New-1CDistroPackage)..." -ForegroundColor Cyan
     $pkg = New-1CDistroPackage
-    if (-not $pkg) { throw "Не удалось подготовить дистрибутив." }
+    if (-not $pkg) {
+        Write-Host "Не удалось подготовить дистрибутив." -ForegroundColor Red
+        return
+    }
 
-    # Если Version задан — строго проверим, что распаковалась именно она
-    if ($PSBoundParameters.ContainsKey('Version')) {
-        if ($pkg.VersionString -ne $Version) {
-            throw "Обнаружена версия '$($pkg.VersionString)', но запрошена '$Version'. Установка остановлена, чтобы не поставить неверный билд."
+    $SetupPath = $pkg.Path       # путь к распакованному '...\\<версия>\\Server\\64'
+    $pkgVer    = $pkg.VersionString
+    Write-Host "Обнаружен пакет версии: $pkgVer" -ForegroundColor DarkGray
+
+    if ($Version -and $pkgVer -ne $Version) {
+        Write-Host "ОШИБКА: распакована версия $pkgVer, ожидалась $Version. Установка остановлена." -ForegroundColor Red
+        return
+    }
+
+    # --- 4) Удаляем архив соответствующей версии из 1Cv8.adm (если был) ---
+    if ($pkgVer) {
+        $verU = $pkgVer -replace '\.', '_'
+        $rarMask = "windows64full_${verU}.rar"
+        $rarFiles = Get-ChildItem -LiteralPath $admPath -Filter $rarMask -File -ErrorAction SilentlyContinue
+        foreach ($rar in $rarFiles) {
+            Write-Host "Удаляю архив: $($rar.FullName)" -ForegroundColor DarkGray
+            Remove-Item -LiteralPath $rar.FullName -Force
         }
     }
 
-    $setupDir = $pkg.Path  # Ожидаем '...\\<версия>\\Server\\64'
-    if (-not (Test-Path -LiteralPath $setupDir)) {
-        throw "Каталог пакета не найден: $setupDir"
+    # --- 5) Установка MSI (явные свойства компонентов) ---
+    $msi = Join-Path $SetupPath '1CEnterprise 8 (x86-64).msi'
+    if (-not (Test-Path -LiteralPath $msi)) {
+        Write-Host "MSI не найден: $msi" -ForegroundColor Red
+        return
     }
 
-    # --- Имя службы и порты ---
-    $svcSuffix = if ($PSBoundParameters.ContainsKey('PortPrefix')) { $PortPrefix } else { $null }
-    $serviceMarker = if ($svcSuffix) { "current$svcSuffix" } else { "current" }
-
-    $regPort = if ($svcSuffix) { [int]("$svcSuffix" + "41") } else { 1541 }
-    $port    = if ($svcSuffix) { [int]("$svcSuffix" + "40") } else { 1540 }
-    $range   = if ($svcSuffix) { "{0}60:{0}91" -f $svcSuffix } else { "1560:1591" }
-
-    # --- Установка MSI серверной части (используем готовый каталог pkg.Path) ---
-    Push-Location $setupDir
+    Push-Location $SetupPath
     try {
-        $msi = Join-Path $setupDir '1CEnterprise 8 (x86-64).msi'
-        if (-not (Test-Path -LiteralPath $msi)) {
-            throw "MSI сервера не найден: $msi"
+        $admMst = Join-Path $SetupPath 'adminstallrelogon.mst'
+        $ruMst  = Join-Path $SetupPath '1049.mst'
+        $transforms = @()
+        if (Test-Path -LiteralPath $admMst) { $transforms += $admMst }
+        if (Test-Path -LiteralPath $ruMst)  { $transforms += $ruMst }
+
+        $params = @('/i', $msi)
+        if ($Quiet)     { $params += '/qn' }
+        if ($NoRestart) { $params += '/norestart' }
+        if ($transforms.Count) {
+            $params += "TRANSFORMS=$($transforms -join ';')"
         }
 
-        # Полный набор свойств MSI — чтобы гарантированно поставить сервер и администрирование
-        $admMst = Join-Path $setupDir 'adminstallrelogon.mst'
-        $ruMst  = Join-Path $setupDir '1049.mst'
-        $trans  = @()
-        if (Test-Path -LiteralPath $admMst) { $trans += $admMst }
-        if (Test-Path -LiteralPath $ruMst)  { $trans += $ruMst }
-
-        $params = @('/i', $msi, '/qn', '/norestart')
-        if ($trans.Count) { $params += "TRANSFORMS=$($trans -join ';')" }
+        # ЯВНОЕ перечисление компонентов — чтобы сервер и администрирование точно поставились
         $params += @(
             'DESIGNERALLCLIENTS=1',
             'THICKCLIENT=1',
@@ -129,28 +161,20 @@ function Install-1CServer {
             'LANGUAGES=RU'
         )
 
-        Write-Host "Выполняется установка сервера 1С..." -ForegroundColor Green
+        Write-Host "Выполняется установка 1С $pkgVer..." -ForegroundColor Green
         & msiexec.exe @params | Out-Null
 
-        # Создание службы со ссылкой на current
-        New-1CCurrentPlatformLink  # формирует C:\\Program Files\\1cv8\\current
-
-        $srvInfo = 'C:\Program Files\1cv8\srvinfo'
-        if (-not (Test-Path $srvInfo)) { New-Item -ItemType Directory -Force -Path $srvInfo | Out-Null }
-
-        $ragent = 'C:\Program Files\1cv8\current\bin\ragent.exe'
-        if (-not (Test-Path $ragent)) { throw "Не найден ragent.exe по ссылке current: $ragent" }
-
-        $svcName = "1C:Enterprise 8.3 Server Agent $serviceMarker"
-        $binPath = "`"$ragent`" -srvc -agent -regport $regPort -port $port -range $range -debug -d `"$srvInfo`""
-
-        Write-Host "Создаю/обновляю службу: $svcName"
-        sc.exe create "$svcName" binPath= "$binPath" start= auto DisplayName= "$svcName" | Out-Null 2>$null
-        sc.exe config "$svcName" binPath= "$binPath" start= auto | Out-Null
-
-        Write-Host "Служба '$svcName' готова." -ForegroundColor Green
+        # Регистрация DLL (по ссылке 'current')
+        $binCurrent = 'C:\Program Files\1cv8\current\bin'
+        $comcntr = Join-Path $binCurrent 'comcntr.dll'
+        $radmin  = Join-Path $binCurrent 'radmin.dll'
+        if (Test-Path -LiteralPath $comcntr) { regsvr32.exe $comcntr -s; Write-Host 'Библиотека comcntrl зарегистрирована' -ForegroundColor Green }
+        if (Test-Path -LiteralPath $radmin)  { regsvr32.exe $radmin  -s; Write-Host 'Библиотека radmin зарегистрирована'  -ForegroundColor Green }
     }
     finally {
         Pop-Location
     }
+
+    # --- 6) Обновляем ссылку 'current' ---
+    New-1CCurrentPlatformLink
 }
