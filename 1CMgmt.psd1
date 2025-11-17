@@ -12,7 +12,7 @@
 RootModule = '1CMgmt.psm1'
 
 # Version number of this module.
-ModuleVersion = '1.1.3'
+ModuleVersion = '1.2.2'
 
 # Supported PSEditions
 # CompatiblePSEditions = @()
