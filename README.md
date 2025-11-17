@@ -379,9 +379,6 @@ MIT License
 ### Поддержка
 
 - **Issues**: [GitHub Issues](https://github.com/yourusername/1CMgmt/issues)
-- **Документация**: [Wiki](https://github.com/yourusername/1CMgmt/wiki)
 - **PowerShell Gallery**: [1CMgmt](https://www.powershellgallery.com/packages/1CMgmt)
 
 ---
-
-**Сделано с ❤️ для администраторов 1С**
