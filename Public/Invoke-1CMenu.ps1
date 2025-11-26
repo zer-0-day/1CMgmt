@@ -12,6 +12,17 @@
         Invoke-1CMenu
     #>
 
+    # Проверка зависимостей при запуске меню
+    try {
+        Test-1CModuleDependency -RequireAdmin
+    }
+    catch {
+        Write-Host "`nОшибка проверки зависимостей: $_" -ForegroundColor Red
+        Write-Host "Для корректной работы модуля необходимо устранить указанные проблемы." -ForegroundColor Yellow
+        Read-Host "`nНажмите Enter для выхода"
+        return
+    }
+
     function Show-MainMenu {
         Clear-Host
         $sep = "=" * 50

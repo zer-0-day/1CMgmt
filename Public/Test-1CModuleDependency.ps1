@@ -66,9 +66,18 @@ function Test-1CModuleDependency{
     }
 
     # Проверка задачи обновления модуля 1CMgmt
-    if ( -not(Get-ScheduledTask -TaskName "Update Module 1CMgmt" -ErrorAction SilentlyContinue)) {
-        Write-Host "Не найдена задача обновления модуля! `nСоздаю задачу обновления модуля в планировщике Windows" -ForegroundColor Red
-        New-ModuleUpdateTask
+    Write-Host "Проверка задачи обновления модуля"
+    if (-not (Get-ScheduledTask -TaskName "Update Module 1CMgmt" -ErrorAction SilentlyContinue)) {
+        Write-Host "Задача обновления модуля не найдена. Создаю..." -ForegroundColor Yellow
+        try {
+            New-ModuleUpdateTask
+            Write-Host "Задача обновления модуля успешно создана" -ForegroundColor Green
+        }
+        catch {
+            Write-Host "Не удалось создать задачу обновления: $_" -ForegroundColor Red
+        }
     }
-    else {Write-Host "Задача обновления модуля найдена в плнировщике Windows" -ForegroundColor Green}
+    else {
+        Write-Host "Задача обновления модуля найдена в планировщике Windows" -ForegroundColor Green
+    }
 }
