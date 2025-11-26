@@ -1,4 +1,4 @@
-function Test-1CServerInstance {
+﻿function Test-1CServerInstance {
     <#
     .SYNOPSIS
         Проверяет конфигурацию экземпляра сервера 1С.
@@ -74,9 +74,9 @@ function Test-1CServerInstance {
             if ($userAccess) {
                 $hasFullControl = $userAccess | Where-Object { $_.FileSystemRights -match 'FullControl' }
                 if ($hasFullControl) {
-                    Write-Host "   ✓ Права доступа для $userSam: FullControl" -ForegroundColor Green
+                    Write-Host "   ✓ Права доступа для ${userSam}: FullControl" -ForegroundColor Green
                 } else {
-                    Write-Host "   ⚠ Права доступа для $userSam: $($userAccess.FileSystemRights)" -ForegroundColor Yellow
+                    Write-Host "   ⚠ Права доступа для ${userSam}: $($userAccess.FileSystemRights)" -ForegroundColor Yellow
                     $warnings += "У пользователя $userSam нет полного доступа к $SrvCatalog"
                 }
             } else {

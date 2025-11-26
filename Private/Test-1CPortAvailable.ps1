@@ -1,4 +1,4 @@
-function Test-1CPortAvailable {
+﻿function Test-1CPortAvailable {
     <#
     .SYNOPSIS
         Проверяет доступность портов для сервера 1С.
