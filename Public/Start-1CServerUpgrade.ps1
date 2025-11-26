@@ -122,6 +122,31 @@ function Start-1CServerUpgrade {
         }
     }
 
+    # --- 3.5) Обновление ссылок currentXX для всех служб ---
+    Write-Host "`nОбновление ссылок current и currentXX..." -ForegroundColor Cyan
+    
+    # Найти все службы 1С и извлечь префиксы портов
+    $allServices = Get-Service -Name "1C:Enterprise 8.3 Server Agent Current*" -ErrorAction SilentlyContinue
+    $additionalPrefixes = @()
+    
+    foreach ($svc in $allServices) {
+        if ($svc.Name -match 'Current(\d{2})$') {
+            $pp = [int]$matches[1]
+            if ($pp -ne 15) {
+                $additionalPrefixes += $pp
+            }
+        }
+    }
+    
+    # Обновить ссылку current
+    New-1CCurrentPlatformLink
+    
+    # Обновить ссылки currentXX для найденных служб
+    if ($additionalPrefixes.Count -gt 0) {
+        Write-Host "Обновление ссылок для дополнительных служб: $($additionalPrefixes -join ', ')" -ForegroundColor Cyan
+        New-1CCurrentPlatformLink -PortPrefix $additionalPrefixes
+    }
+
     # --- 4) Перезапуск нужных служб ---
     $serviceNames = @('1C:Enterprise 8.3 Server Agent Current')
     if ($PortPrefix) {
@@ -137,9 +162,10 @@ function Start-1CServerUpgrade {
     foreach ($svc in $serviceNames | Sort-Object -Unique) {
         $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
         if ($s) {
-            Write-Host "Перезапуск службы: $svc"
+            Write-Host "Перезапуск службы: $svc" -ForegroundColor Cyan
             try {
                 Restart-Service -Name $svc -ErrorAction Stop
+                Write-Host "Служба $svc перезапущена." -ForegroundColor Green
             } catch {
                 Write-Warning "Не удалось перезапустить '$svc': $($_.Exception.Message)"
             }
@@ -148,5 +174,5 @@ function Start-1CServerUpgrade {
         }
     }
 
-    Write-Host "Готово: платформа обновлена до $latestStr, службы перезапущены." -ForegroundColor Green
+    Write-Host "`nГотово: платформа обновлена до $latestStr, службы перезапущены." -ForegroundColor Green
 }
